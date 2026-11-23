@@ -213,7 +213,8 @@ write_snmpNotifyFilterProfileName(int action,
                                   oid * name, size_t name_len)
 {
     static char    *tmpvar;
-    static int      allocated;
+    static struct snmpNotifyFilterProfileTable_data *allocated_row;
+    static int      allocated_is_new;
     struct snmpNotifyFilterProfileTable_data *StorageTmp = NULL;
     static size_t   tmplen;
     size_t          newlen = name_len - table_offset;
@@ -234,7 +235,8 @@ write_snmpNotifyFilterProfileName(int action,
     case RESERVE1:
         tmpvar = NULL;
         tmplen = 0;
-        allocated = 0;
+        allocated_row = NULL;
+        allocated_is_new = 0;
         if (var_val_type != ASN_OCTET_STR) {
             return SNMP_ERR_WRONGTYPE;
         }
@@ -248,6 +250,11 @@ write_snmpNotifyFilterProfileName(int action,
         /*
          * memory reseveration, final preparation... 
          */
+        if (allocated_row != NULL) {
+            DEBUGMSGTL(("snmpNotifyFilterProfileTable",
+                        "writing multiple snmpNotifyFilterProfileName values not supported\n"));
+            return SNMP_ERR_GENERR;
+        }
         tmpvar = StorageTmp->snmpNotifyFilterProfileName;
         tmplen = StorageTmp->snmpNotifyFilterProfileNameLen;
         StorageTmp->snmpNotifyFilterProfileName = calloc(1, var_val_len + 1);
@@ -256,7 +263,8 @@ write_snmpNotifyFilterProfileName(int action,
             tmpvar = NULL;
             return SNMP_ERR_RESOURCEUNAVAILABLE;
         }
-        allocated = 1;
+        allocated_row = StorageTmp;
+        allocated_is_new = (StorageTmp == StorageNew);
         break;
 
 
@@ -265,19 +273,17 @@ write_snmpNotifyFilterProfileName(int action,
         /*
          * Release any resources that have been allocated 
          */
-        if (allocated) {
-            if ((StorageTmp = snmpNotifyFilterProfileTable_oldapi_find(
-                     NULL, &name[table_offset], &newlen, 1,
-                     NULL, NULL)) != NULL ||
-                (StorageTmp = StorageNew) != NULL) {
-                SNMP_FREE(StorageTmp->snmpNotifyFilterProfileName);
-                StorageTmp->snmpNotifyFilterProfileName = tmpvar;
-                StorageTmp->snmpNotifyFilterProfileNameLen = tmplen;
+        if (allocated_row != NULL) {
+            if (!allocated_is_new || StorageNew != NULL) {
+                SNMP_FREE(allocated_row->snmpNotifyFilterProfileName);
+                allocated_row->snmpNotifyFilterProfileName = tmpvar;
+                allocated_row->snmpNotifyFilterProfileNameLen = tmplen;
             } else {
                 SNMP_FREE(tmpvar);
             }
             tmpvar = NULL;
-            allocated = 0;
+            allocated_row = NULL;
+            allocated_is_new = 0;
         }
         break;
 
@@ -299,7 +305,8 @@ write_snmpNotifyFilterProfileName(int action,
          * permanently.  Make sure that anything done here can't fail! 
          */
         SNMP_FREE(tmpvar);
-        allocated = 0;
+        allocated_row = NULL;
+        allocated_is_new = 0;
         snmp_store_needed(NULL);
         break;
     }
@@ -483,6 +490,9 @@ write_snmpNotifyFilterProfileRowStatus(int action,
             /*
              * creation 
              */
+            if (StorageNew != NULL) {
+                return SNMP_ERR_GENERR;
+            }
             vars = NULL;
 
             snmp_varlist_add_variable(&vars, NULL, 0,

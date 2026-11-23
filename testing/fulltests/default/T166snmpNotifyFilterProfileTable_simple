@@ -1,0 +1,109 @@
+#!/bin/sh
+
+. ../support/simple_eval_tools.sh
+
+HEADER snmpNotifyFilterProfileTable multi-varbind SET handling
+
+SKIPIF NETSNMP_DISABLE_SNMPV2C
+SKIPIF NETSNMP_DISABLE_SET_SUPPORT
+SKIPIF NETSNMP_NO_WRITE_SUPPORT
+SKIPIFNOT USING_NOTIFICATION_SNMPNOTIFYFILTERPROFILETABLE_MODULE
+
+#
+# Regression test for heap buffer overflow in
+# write_snmpNotifyFilterProfileName() when multiple
+# snmpNotifyFilterProfileName varbinds are present in a single SET PDU.
+#
+
+CONFIGAGENT "rwcommunity private"
+
+STARTAGENT
+
+AGENT_ADDR="$SNMP_TRANSPORT_SPEC:$SNMP_TEST_DEST$SNMP_SNMPD_PORT"
+SNMP_V2C_ARGS="-On -Oe $SNMP_FLAGS -v2c -c private $AGENT_ADDR"
+
+NAME=.1.3.6.1.6.3.13.1.2.1.1
+RS=.1.3.6.1.6.3.13.1.2.1.3
+# Implied OCTET STRING indices: "p1", "p2", "p3", "p4"
+P1=112.49
+P2=112.50
+P3=112.51
+P4=112.52
+
+LONG_NAME=`awk 'BEGIN { for (i = 0; i < 32; i++) printf "A" }'`
+
+# Create rows 'p1' and 'p2' (testing both varbind orders: RS+Name and Name+RS).
+CAPTURE "snmpset $SNMP_V2C_ARGS $RS.$P1 i 4 $NAME.$P1 s orig1"
+CHECKORDIE "^$NAME.$P1 = STRING: \"*orig1\"*$"
+
+CAPTURE "snmpset $SNMP_V2C_ARGS $NAME.$P2 s orig2 $RS.$P2 i 4"
+CHECKORDIE "^$NAME.$P2 = STRING: \"*orig2\"*$"
+
+# Duplicate snmpNotifyFilterProfileName varbinds for the same row (32 bytes
+# then 1 byte) used to trigger a heap buffer overflow write.
+CAPTURE "snmpset $SNMP_V2C_ARGS $NAME.$P1 s $LONG_NAME $NAME.$P1 s B"
+CHECKORDIE "genError"
+
+CAPTURE "snmpget $SNMP_V2C_ARGS $NAME.$P1"
+CHECKORDIE "^$NAME.$P1 = STRING: \"*orig1\"*$"
+
+# Reverse order (1 byte then 32 bytes) for the same row must also fail cleanly.
+CAPTURE "snmpset $SNMP_V2C_ARGS $NAME.$P1 s B $NAME.$P1 s $LONG_NAME"
+CHECKORDIE "genError"
+
+CAPTURE "snmpget $SNMP_V2C_ARGS $NAME.$P1"
+CHECKORDIE "^$NAME.$P1 = STRING: \"*orig1\"*$"
+
+# Multiple snmpNotifyFilterProfileName varbinds across different rows are
+# rejected cleanly without corrupting either row.
+CAPTURE "snmpset $SNMP_V2C_ARGS $NAME.$P1 s new1 $NAME.$P2 s new2"
+CHECKORDIE "genError"
+
+CAPTURE "snmpget $SNMP_V2C_ARGS $NAME.$P1 $NAME.$P2"
+CHECKORDIE "^$NAME.$P1 = STRING: \"*orig1\"*$"
+CHECKORDIE "^$NAME.$P2 = STRING: \"*orig2\"*$"
+
+# createAndGo with duplicate snmpNotifyFilterProfileName must roll back cleanly.
+CAPTURE "snmpset $SNMP_V2C_ARGS $RS.$P3 i 4 $NAME.$P3 s abc $NAME.$P3 s def"
+CHECKORDIE "genError"
+
+CAPTURE "snmpget $SNMP_V2C_ARGS $NAME.$P3"
+CHECKORDIE "No Such Instance"
+
+# createAndGo plus name plus a varbind failing in RESERVE1 must roll back cleanly.
+CAPTURE "snmpset $SNMP_V2C_ARGS $RS.$P3 i 4 $NAME.$P3 s abc $RS.$P4 i 99"
+CHECKORDIE "wrongValue"
+
+CAPTURE "snmpget $SNMP_V2C_ARGS $NAME.$P3"
+CHECKORDIE "No Such Instance"
+
+# Two createAndGo RowStatus varbinds in one PDU must fail and roll back cleanly.
+CAPTURE "snmpset $SNMP_V2C_ARGS $RS.$P3 i 4 $RS.$P4 i 4"
+CHECKORDIE "genError"
+
+CAPTURE "snmpget $SNMP_V2C_ARGS $RS.$P3"
+CHECKORDIE "No Such Instance"
+
+# Normal single-varbind update and destroy must still succeed.
+CAPTURE "snmpset $SNMP_V2C_ARGS $NAME.$P1 s updated1"
+CHECKORDIE "^$NAME.$P1 = STRING: \"*updated1\"*$"
+
+CAPTURE "snmpget $SNMP_V2C_ARGS $NAME.$P1"
+CHECKORDIE "^$NAME.$P1 = STRING: \"*updated1\"*$"
+
+CAPTURE "snmpset $SNMP_V2C_ARGS $RS.$P1 i 6"
+CHECKORDIE "^$RS.$P1 = INTEGER: 6$"
+
+CAPTURE "snmpset $SNMP_V2C_ARGS $RS.$P2 i 6"
+CHECKORDIE "^$RS.$P2 = INTEGER: 6$"
+
+# Verify the agent is still alive and responsive.
+CAPTURE "snmpget $SNMP_V2C_ARGS .1.3.6.1.2.1.1.3.0"
+CHECKORDIE "^.1.3.6.1.2.1.1.3.0 = Timeticks:"
+
+STOPAGENT
+
+CHECKANDDIE "AddressSanitizer" "$SNMP_SNMPD_LOG_FILE.stdout"
+CHECKANDDIE "LeakSanitizer" "$SNMP_SNMPD_LOG_FILE.stdout"
+
+FINISHED
